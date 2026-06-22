@@ -138,6 +138,14 @@ main{ position:relative; z-index:1; }
 }
 .playerCol iframe{ width:100%; height:100%; border:none; display:block; }
 
+.playerNote{
+  width:100%; max-width:1280px; text-align:center;
+  font-size:11.5px; line-height:1.6; color:var(--muted);
+  margin-top:4px;
+}
+.playerNote a{ color:var(--cyan); text-decoration:underline; text-decoration-color:rgba(0,207,221,.4); }
+.playerNote a:hover{ color:var(--text); }
+
 .waveDivider{ width:100%; max-width:640px; height:34px; margin:6px 0 0; }
 
 .epStrip{ display:flex; gap:8px; overflow-x:auto; padding:2px 2px 12px; }
