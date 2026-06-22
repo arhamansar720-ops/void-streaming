@@ -308,7 +308,6 @@ export default function Page() {
                 <iframe
                   src={streamUrlFor(result)}
                   allowFullScreen
-                  sandbox="allow-scripts allow-same-origin allow-presentation"
                 />
               </div>
             </div>
