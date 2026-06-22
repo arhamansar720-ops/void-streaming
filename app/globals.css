@@ -115,10 +115,10 @@ main{ position:relative; z-index:1; }
 .bubble.error{ color:var(--ember); }
 .bubble.error .dot{ background:var(--ember); }
 
-.resultView{ display:none; width:100%; max-width:1180px; }
+.resultView{ display:none; width:100%; max-width:1320px; margin:0 auto; }
 .resultView.show{ display:block; }
-.resultGrid{ display:grid; grid-template-columns:.85fr 1.15fr; gap:50px; align-items:start; }
-.metaCol{ text-align:center; }
+.resultGrid{ display:flex; flex-direction:column; align-items:center; gap:28px; }
+.metaCol{ text-align:center; max-width:640px; }
 .metaCol .show{ font-size:11px; letter-spacing:2.5px; color:var(--cyan); text-transform:uppercase; margin-bottom:14px; }
 .metaCol h2{ font-family:var(--font-display); font-size:clamp(30px,4vw,44px); letter-spacing:.5px; line-height:1.05; text-transform:uppercase; }
 .metaCol .sub{ font-family:var(--font-serif); font-style:italic; color:var(--muted); margin-top:12px; font-size:15px; }
@@ -132,10 +132,13 @@ main{ position:relative; z-index:1; }
 .pillBtn.primary{ border-color:var(--cyan); color:var(--cyan); }
 .pillBtn.primary:hover{ background:var(--cyan); color:var(--void); }
 
-.playerCol{ border:1px solid var(--line); border-radius:4px; overflow:hidden; background:#000; aspect-ratio:16/9; }
+.playerCol{
+  border:1px solid var(--line); border-radius:4px; overflow:hidden; background:#000;
+  aspect-ratio:16/9; width:100%; max-width:1280px;
+}
 .playerCol iframe{ width:100%; height:100%; border:none; display:block; }
 
-.waveDivider{ width:100%; height:34px; margin:26px 0 6px; }
+.waveDivider{ width:100%; max-width:640px; height:34px; margin:6px 0 0; }
 
 .epStrip{ display:flex; gap:8px; overflow-x:auto; padding:2px 2px 12px; }
 .epChip{ flex:none; min-width:118px; border:1px solid var(--line); border-radius:3px; padding:11px 13px; cursor:pointer; transition:.2s; }
@@ -149,5 +152,5 @@ footer{ position:relative; z-index:1; text-align:center; color:var(--muted); fon
 .hidden{ display:none !important; }
 
 @media (max-width:880px){
-  .resultGrid{ grid-template-columns:1fr; }
+  .playerCol{ max-width:100%; }
 }
