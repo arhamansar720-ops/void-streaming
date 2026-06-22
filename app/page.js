@@ -34,6 +34,7 @@ export default function Page() {
 
   const contextRef = useRef({ lastResult: null, lastSuggestionSlugs: [], lastSuggestionIds: [] });
   const inputRef = useRef(null);
+  const resultRef = useRef(null);
 
   // typewriter placeholder
   useEffect(() => {
@@ -66,6 +67,13 @@ export default function Page() {
     const raw = localStorage.getItem("void_continue");
     if (raw) setRecall(JSON.parse(raw));
   }, []);
+
+  // auto-scroll down to the player once a result is actually rendered
+  useEffect(() => {
+    if (result && resultRef.current) {
+      resultRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [result]);
 
   function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -282,7 +290,7 @@ export default function Page() {
 
       {result && (
         <section className="view">
-          <div className="resultView show">
+          <div className="resultView show" ref={resultRef}>
             <div className="eyebrow" style={{ textAlign: "center", width: "100%" }}>02 — PLAYBACK</div>
             <div className="resultGrid">
               <div className="metaCol">
