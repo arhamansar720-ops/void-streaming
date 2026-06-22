@@ -318,6 +318,12 @@ export default function Page() {
                   allowFullScreen
                 />
               </div>
+              <div className="playerNote">
+                Some clicks inside the player may trigger a pop-up or redirect — that comes
+                from the embed itself, not this app. Running an ad blocker like{" "}
+                <a href="https://ublockorigin.com" target="_blank" rel="noopener noreferrer">uBlock Origin</a>
+                {" "}(or using Brave, which has one built in) stops it cleanly.
+              </div>
             </div>
             {result.mediaType === "tv" && result.seasonEpisodes?.length > 0 && (
               <div className="epStrip">
