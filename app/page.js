@@ -4,6 +4,9 @@ import Starfield from "@/components/Starfield";
 import RingParticle from "@/components/RingParticle";
 import WaveDivider from "@/components/WaveDivider";
 import Player from "@/components/Player";
+import { AnimatePresence, motion } from "motion/react";
+import BlurText from "@/components/reactbits/BlurText";
+import SpotlightCard from "@/components/reactbits/SpotlightCard";
 
 const PLACEHOLDER_PHRASES = [
   "dexter season 3 episode 2",
@@ -231,7 +234,10 @@ export default function Page() {
         <div className="heroGrid">
           <div className="heroLeft">
             <div className="eyebrow">01 — SEARCH</div>
-            <h1 className="heroTitle">Tonight&apos;s<br />the <em>Night.</em></h1>
+            <h1 className="heroTitle">
+              <BlurText text="Tonight's" delay={90} animateBy="letters" /><br />
+              <BlurText text="the" delay={90} />{" "}<em><BlurText text="Night." delay={110} animateBy="letters" /></em>
+            </h1>
             <p className="heroSub">
               No browsing, no rows, no menus — just say what you want. Name a show or an episode,
               describe a mood, or ask for something like a show you already love.
@@ -293,23 +299,44 @@ export default function Page() {
 
         {thread.length > 0 && (
           <div className="threadView show">
-            {thread.map((b) =>
-              b.suggestions ? (
-                <div key={b.id} className="suggestRow">
-                  {b.suggestions.map((sug) => (
-                    <button key={sug.title + sug.year} className="suggestChip" onClick={() => runQuery(sug.query)} disabled={busy}>
-                      <b>{sug.title}</b>
-                      <span>{[sug.year, sug.type === "movie" ? "Film" : "Series"].filter(Boolean).join(" · ")}</span>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div key={b.id} className={`bubble ${b.role === "user" ? "user" : ""} ${b.found ? "found" : ""} ${b.error ? "error" : ""} ${b.pending ? "pending" : ""}`}>
-                  <span className="dot" />
-                  <span>{b.text}</span>
-                </div>
-              )
-            )}
+            <AnimatePresence initial={false}>
+              {thread.map((b) =>
+                b.suggestions ? (
+                  <motion.div
+                    key={b.id}
+                    className="suggestRow"
+                    initial="hidden"
+                    animate="show"
+                    variants={{ show: { transition: { staggerChildren: 0.07 } } }}
+                  >
+                    {b.suggestions.map((sug) => (
+                      <motion.div
+                        key={sug.title + sug.year}
+                        variants={{ hidden: { opacity: 0, y: 14, filter: "blur(6px)" }, show: { opacity: 1, y: 0, filter: "blur(0px)" } }}
+                      >
+                        <SpotlightCard as="button" className="suggestChip" onClick={() => runQuery(sug.query)} disabled={busy}>
+                          <b>{sug.title}</b>
+                          <span>{[sug.year, sug.type === "movie" ? "Film" : "Series"].filter(Boolean).join(" · ")}</span>
+                        </SpotlightCard>
+                      </motion.div>
+                    ))}
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key={b.id}
+                    layout="position"
+                    initial={{ opacity: 0, y: 8, filter: "blur(4px)" }}
+                    animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                    exit={{ opacity: 0, transition: { duration: 0.15 } }}
+                    transition={{ duration: 0.3 }}
+                    className={`bubble ${b.role === "user" ? "user" : ""} ${b.found ? "found" : ""} ${b.error ? "error" : ""} ${b.pending ? "pending" : ""}`}
+                  >
+                    <span className="dot" />
+                    <span>{b.text}</span>
+                  </motion.div>
+                )
+              )}
+            </AnimatePresence>
             <div ref={threadEndRef} />
           </div>
         )}
@@ -324,12 +351,12 @@ export default function Page() {
                 <div className="show">{result.showTitle}</div>
                 {result.mediaType === "movie" ? (
                   <>
-                    <h2>{result.year ? result.year : "Movie"}</h2>
+                    <h2><BlurText key={result.tmdbId} text={result.year ? String(result.year) : "Movie"} delay={80} animateBy="letters" /></h2>
                     <div className="sub">Feature film</div>
                   </>
                 ) : (
                   <>
-                    <h2>S{result.season} · E{result.episode} — {result.episodeTitle}</h2>
+                    <h2><BlurText key={`${result.tmdbId}-${result.season}-${result.episode}`} text={`S${result.season} · E${result.episode} — ${result.episodeTitle}`} delay={60} /></h2>
                     <div className="sub">Season {result.season} of {result.totalSeasons} · Episode {result.episode}</div>
                   </>
                 )}
