@@ -23,8 +23,11 @@ export async function POST(request) {
   }
 
   try {
+    if (body.debug) globalThis.__trace = [];
     const intent = await understand(query.slice(0, 300), history, context);
-    return NextResponse.json(await act(intent, query, context));
+    const out = await act(intent, query, context);
+    if (body.debug) { out.trace = [JSON.stringify(intent), ...globalThis.__trace]; globalThis.__trace = null; }
+    return NextResponse.json(out);
   } catch (err) {
     console.error("search failed, using offline library:", err.message);
     return NextResponse.json(await offline(query, context));
