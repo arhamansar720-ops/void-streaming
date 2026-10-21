@@ -13,7 +13,8 @@ const PREF_KEY = "void_server";
 const FAILS_KEY = "void_server_fails";
 const LOAD_TIMEOUT_MS = 12000;
 const FAIL_MEMORY_MS = 30 * 60 * 1000; // a server that hung is tried last for 30 min
-const SCAN_STEP_MS = 380;
+// Whole sweep lasts ~5s however many servers there are (each pill gets 240–380ms).
+const SCAN_STEP_MS = Math.round(Math.min(380, Math.max(240, 5000 / SERVERS.length)));
 const SWITCH_STEP_MS = 280;
 const PROBE_WAIT_MS = 5000;
 const MIN_CONNECT_MS = 2000; // let the winning pill sit expanded before the blur lifts

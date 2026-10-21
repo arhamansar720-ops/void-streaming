@@ -193,7 +193,7 @@ footer{ position:relative; z-index:1; text-align:center; color:var(--muted); fon
 
 /* server pills: minimized = dot + name; expanded = brighter, wider, with a status label */
 .pillRack{ display:flex; gap:7px; align-items:center; }
-.pillRack.centered{ flex-wrap:wrap; justify-content:center; max-width:760px; }
+.pillRack.centered{ flex-wrap:wrap; justify-content:center; max-width:900px; }
 .pillRack.docked{ flex-wrap:wrap; flex:1; min-width:0; }
 .pillRack .spill{ flex:none; }
 .spill{
