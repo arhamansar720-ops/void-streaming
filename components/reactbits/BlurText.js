@@ -12,13 +12,13 @@ const buildKeyframes = (from, steps) => {
 
 export default function BlurText({
   text = "",
-  delay = 120,
+  delay = 180,
   className = "",
   as: Tag = "span",
   animateBy = "words",
   direction = "top",
   threshold = 0.1,
-  stepDuration = 0.35,
+  stepDuration = 0.6,
 }) {
   const elements = animateBy === "words" ? text.split(" ") : text.split("");
   const [inView, setInView] = useState(false);

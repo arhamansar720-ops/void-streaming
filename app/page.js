@@ -116,7 +116,7 @@ export default function Page() {
     const id = addBubble("", opts);
     const stepSize = Math.max(1, Math.ceil(text.length / 90));
     for (let i = stepSize; i < text.length + stepSize; i += stepSize) {
-      await wait(14);
+      await wait(24);
       patchBubble(id, { text: text.slice(0, i) });
     }
     return id;
@@ -316,7 +316,7 @@ export default function Page() {
             </div>
 
             {history.length > 0 && !result && (
-              <motion.div className="history" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}>
+              <motion.div className="history" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.7, duration: 0.8 }}>
                 <div className="historyHead">
                   <div className="label">Continue Watching</div>
                   <button className="linkBtn" onClick={() => setHistoryOpen(true)}>History ({history.length}) →</button>
@@ -327,7 +327,7 @@ export default function Page() {
                       key={e.key}
                       initial={{ opacity: 0, x: 16 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: 0.55 + i * 0.05 }}
+                      transition={{ delay: 0.8 + i * 0.12, duration: 0.6 }}
                     >
                       <SpotlightCard as="button" className="histCard" onClick={() => playHistory(e)} disabled={busy}>
                         {e.backdrop && <img src={e.backdrop} alt="" loading="lazy" />}
@@ -358,12 +358,12 @@ export default function Page() {
                     className="suggestRow"
                     initial="hidden"
                     animate="show"
-                    variants={{ show: { transition: { staggerChildren: 0.07 } } }}
+                    variants={{ show: { transition: { staggerChildren: 0.15 } } }}
                   >
                     {b.suggestions.map((sug) => (
                       <motion.div
                         key={sug.title + sug.year}
-                        variants={{ hidden: { opacity: 0, y: 14, filter: "blur(6px)" }, show: { opacity: 1, y: 0, filter: "blur(0px)" } }}
+                        variants={{ hidden: { opacity: 0, y: 14, filter: "blur(6px)" }, show: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0.7 } } }}
                       >
                         <SpotlightCard as="button" className="suggestChip" onClick={() => runQuery(sug.query)} disabled={busy}>
                           <b>{sug.title}</b>
@@ -378,8 +378,8 @@ export default function Page() {
                     layout="position"
                     initial={{ opacity: 0, y: 8, filter: "blur(4px)" }}
                     animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                    exit={{ opacity: 0, transition: { duration: 0.15 } }}
-                    transition={{ duration: 0.3 }}
+                    exit={{ opacity: 0, transition: { duration: 0.3 } }}
+                    transition={{ duration: 0.6 }}
                     className={`bubble ${b.role === "user" ? "user" : ""} ${b.found ? "found" : ""} ${b.error ? "error" : ""} ${b.pending ? "pending" : ""}`}
                   >
                     <span className="dot" />
@@ -468,7 +468,7 @@ export default function Page() {
               initial={{ x: "100%" }}
               animate={{ x: 0 }}
               exit={{ x: "100%" }}
-              transition={{ type: "spring", stiffness: 320, damping: 36 }}
+              transition={{ type: "spring", stiffness: 140, damping: 24 }}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="historyPanelHead">
@@ -478,7 +478,7 @@ export default function Page() {
                 </div>
                 <button className="linkBtn" onClick={() => setHistoryOpen(false)}>Close ✕</button>
               </div>
-              <motion.ul className="historyList" initial="h" animate="s" variants={{ s: { transition: { staggerChildren: 0.03 } } }}>
+              <motion.ul className="historyList" initial="h" animate="s" variants={{ s: { transition: { staggerChildren: 0.08, delayChildren: 0.2 } } }}>
                 <AnimatePresence initial={false}>
                   {history.map((e) => (
                     <motion.li

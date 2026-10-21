@@ -13,10 +13,10 @@ const PREF_KEY = "void_server";
 const FAILS_KEY = "void_server_fails";
 const LOAD_TIMEOUT_MS = 12000;
 const FAIL_MEMORY_MS = 30 * 60 * 1000; // a server that hung is tried last for 30 min
-const SCAN_STEP_MS = 150;
-const SWITCH_STEP_MS = 110;
+const SCAN_STEP_MS = 380;
+const SWITCH_STEP_MS = 280;
 const PROBE_WAIT_MS = 5000;
-const MIN_CONNECT_MS = 900; // let the winning pill sit expanded before the blur lifts
+const MIN_CONNECT_MS = 2000; // let the winning pill sit expanded before the blur lifts
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -194,7 +194,7 @@ export default function Player({ result, onLive }) {
   // Rendered in exactly one slot at a time (over the stage while veiled, in the strip once live);
   // the shared layoutIds make every pill glide between the two.
   const rack = (
-    <motion.div layout className={`pillRack ${veiled ? "centered" : "docked"}`} transition={{ type: "spring", stiffness: 260, damping: 30 }}>
+    <motion.div layout className={`pillRack ${veiled ? "centered" : "docked"}`} transition={{ type: "spring", stiffness: 90, damping: 20 }}>
       {order.map((s) => {
         const st = pillState(s);
         const expanded = st === "checking" || st === "connecting" || st === "active";
@@ -205,7 +205,7 @@ export default function Player({ result, onLive }) {
             layoutId={`srv-${s.id}`}
             className={`spill ${st}`}
             onClick={() => pick(s.id)}
-            transition={{ type: "spring", stiffness: 520, damping: 36 }}
+            transition={{ type: "spring", stiffness: 110, damping: 18 }}
             whileHover={view === "live" ? { y: -2 } : undefined}
             whileTap={{ scale: 0.95 }}
             title={st === "down" ? "Not available for this title right now" : s.name}
@@ -220,7 +220,7 @@ export default function Player({ result, onLive }) {
                   initial={{ opacity: 0, width: 0 }}
                   animate={{ opacity: 1, width: "auto" }}
                   exit={{ opacity: 0, width: 0 }}
-                  transition={{ duration: 0.18 }}
+                  transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
                 >
                   {LABEL[st]}
                 </motion.span>
@@ -263,7 +263,7 @@ export default function Player({ result, onLive }) {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                transition={{ duration: 0.5 }}
+                transition={{ duration: 1.1, ease: "easeInOut" }}
               >
                 <AnimatePresence mode="wait">
                   <motion.div
@@ -272,7 +272,7 @@ export default function Player({ result, onLive }) {
                     initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
                     animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
                     exit={{ opacity: 0, y: -8, filter: "blur(6px)" }}
-                    transition={{ duration: 0.25 }}
+                    transition={{ duration: 0.5 }}
                   >
                     {view === "exhausted" ? headline : <ShinyText speed={2}>{headline}</ShinyText>}
                   </motion.div>
