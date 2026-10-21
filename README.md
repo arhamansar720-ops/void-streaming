@@ -73,6 +73,26 @@ If you're updating an existing Vercel project that was pointed at the old
 static file, just push this code to the same repo — Vercel will detect the
 framework change on the next deploy automatically.
 
+## Search, conversation & playback
+
+- **Search works out of the box.** With no keys, titles, seasons and episodes come
+  from Cinemeta (Stremio's public catalog). Set `TMDB_API_KEY` to switch to TMDB,
+  which gives better "something like X" recommendations; Cinemeta stays as a backup.
+- **Conversation.** `lib/brain.js` turns each message plus the chat history into an
+  intent (play / recommend / next episode / chat). Set `GROQ_API_KEY` (optional
+  `GROQ_MODEL`, default `openai/gpt-oss-120b`) for an LLM that fixes typos and
+  nicknames, answers questions and picks recommendations. Without it, a rule-based
+  parser handles moods, "like X", "next", "season 3", "the finale" and so on.
+- **Servers.** `lib/servers.js` lists every embed provider. `/api/servers` probes them
+  (cached 10 min) and the player skips dead ones, auto-switches when a server hangs,
+  and lets viewers pick one manually. To add or remove a provider, edit that file.
+
+| Env var | Required | What it does |
+| --- | --- | --- |
+| `TMDB_API_KEY` | no | TMDB catalog + real recommendations |
+| `GROQ_API_KEY` | no | LLM conversation |
+| `GROQ_MODEL` | no | Override the Groq model |
+
 ## Searching any show or movie (TMDB)
 
 By default, without any setup, search is limited to the 5 hardcoded shows

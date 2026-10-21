@@ -1,204 +1,212 @@
 import { NextResponse } from "next/server";
-import { extractSeasonEpisode, normalize, isSuggestionQuery, resolveQuery, buildSuggestionReply, tryFollowup } from "@/lib/queryEngine";
+import { catalog } from "@/lib/catalog";
+import { understand } from "@/lib/brain";
 import { getLibrary } from "@/lib/library";
-import { tmdbEnabled, searchTitle, getTvDetails, getSeasonDetails, getMovieDetails, getTrending } from "@/lib/tmdb";
+import { resolveQuery, tryFollowup, buildSuggestionReply } from "@/lib/queryEngine";
 
-function streamUrlMovie(id) {
-  return `https://www.vidking.net/embed/movie/${id}`;
-}
-function streamUrlTv(id, season, episode) {
-  return `https://www.vidking.net/embed/tv/${id}/${season}/${episode}`;
-}
-
-const FOLLOWUP_NEXT = /^(next|next episode|next one|continue|keep going|play next|play the next one|next ep)\b/;
-const FOLLOWUP_PREV = /^(previous|last episode|go back|prior episode|back one)\b/;
-const FOLLOWUP_ANOTHER = /^(another|something else|different one|not (that|this)|skip (this|that)|none of (those|these)|other options?)\b/;
-const FOLLOWUP_SEASON_ONLY = /^(what about |try |go to |switch to )?season\s*(\d{1,2})$/;
+// Response shapes:
+//   { kind: "result", reply, result }
+//   { kind: "suggestion", reply, suggestions: [{ title, type, year, query }], rec }
+//   { kind: "chat", reply }
+//   { kind: "no-match", reply }
 
 export async function POST(request) {
   let body;
   try { body = await request.json(); } catch {
-    return NextResponse.json({ ok: false, reason: "bad-request" }, { status: 400 });
+    return NextResponse.json({ kind: "chat", reply: "That didn't come through — try again." }, { status: 400 });
   }
-  const { query, context } = body || {};
+  const { query } = body || {};
+  const context = body?.context || {};
+  const history = Array.isArray(body?.history) ? body.history : [];
   if (!query || typeof query !== "string") {
-    return NextResponse.json({ ok: false, reason: "missing-query" }, { status: 400 });
-  }
-
-  if (!tmdbEnabled()) {
-    return handleFallback(query, context);
+    return NextResponse.json({ kind: "chat", reply: "Type something to watch." }, { status: 400 });
   }
 
   try {
-    return await handleTmdb(query, context);
+    const intent = await understand(query.slice(0, 300), history, context);
+    return NextResponse.json(await act(intent, query, context));
   } catch (err) {
-    console.error("TMDB search failed, falling back to local library:", err.message);
-    return handleFallback(query, context);
+    console.error("search failed, using offline library:", err.message);
+    return NextResponse.json(await offline(query, context));
   }
 }
 
-async function buildTrendingSuggestion(context) {
-  const trending = await getTrending();
-  const excludeIds = context?.lastSuggestionIds || [];
-  const pool = trending.filter((item) => !excludeIds.includes(item.id));
-  const usePool = pool.length >= 3 ? pool : trending;
-  const picks = usePool.slice(0, 8).sort(() => Math.random() - 0.5).slice(0, 3);
-  const lines = picks.map((p) => `${p.title || p.name} — try "${(p.title || p.name).toLowerCase()}"`);
-  return NextResponse.json({
-    kind: "suggestion",
-    text: `Trending this week: ${lines.join(" · ")}.`,
-    ids: picks.map((p) => p.id),
-  });
+async function act(intent, raw, context) {
+  const lr = context.lastResult;
+
+  if (intent.intent === "step" && lr?.mediaType === "tv") {
+    return stepEpisode(lr, intent.dir === -1 ? -1 : 1, intent.reply);
+  }
+
+  if (intent.intent === "recommend") return recommend(intent, context);
+
+  if (intent.intent === "play") {
+    // Season/episode with no title → the show that's on screen
+    if ((intent.useCurrent || !intent.title) && lr?.mediaType === "tv") {
+      const show = await catalog.show({ tmdbId: lr.tmdbId, imdbId: lr.imdbId, type: "tv", title: lr.title });
+      return playShow(show, intent, intent.reply);
+    }
+    if (intent.title) return play(intent, raw);
+  }
+
+  return { kind: "chat", reply: intent.reply || "Tell me a show, a movie, or a mood." };
 }
 
-// ============================================================
-// TMDB-backed path — searches the real catalog, not a fixed list
-// ============================================================
-async function handleTmdb(query, context) {
-  const t = normalize(query);
-
-  // "something else" / "another one" after a suggestion list
-  if (FOLLOWUP_ANOTHER.test(t) && context?.lastSuggestionIds?.length) {
-    return buildTrendingSuggestion(context);
+// ---------------- playback ----------------
+async function play(intent, raw) {
+  const opts = { type: intent.type, year: intent.year };
+  let item = await catalog.findOne(intent.title, opts);
+  // Rule parser strips words like "show"/"now" — retry with the untouched text if that broke the title.
+  if (!item && intent.via === "rules") item = await catalog.findOne(raw.replace(/s\d+\s*e\d+/i, ""), opts).catch(() => null);
+  if (!item) {
+    return { kind: "no-match", reply: `Couldn't find "${intent.title}". Check the spelling, or describe it and I'll guess.` };
   }
-
-  // next/previous episode, season jump — only meaningful if we just watched a TV episode
-  const lr = context?.lastResult;
-  if (lr && lr.mediaType === "tv") {
-    if (FOLLOWUP_NEXT.test(t) || FOLLOWUP_PREV.test(t)) {
-      return NextResponse.json(await stepTmdbEpisode(lr, FOLLOWUP_NEXT.test(t) ? 1 : -1));
-    }
-    const seasonOnly = t.match(FOLLOWUP_SEASON_ONLY);
-    if (seasonOnly) {
-      const jumped = await jumpTmdbSeason(lr, parseInt(seasonOnly[2]));
-      if (jumped) return NextResponse.json(jumped);
-    }
-  }
-
-  if (isSuggestionQuery(query)) {
-    return buildTrendingSuggestion(context);
-  }
-
-  const { season, episode, finale, text } = extractSeasonEpisode(t);
-  if (!text) return NextResponse.json({ kind: "no-match" });
-
-  const found = await searchTitle(text);
-  if (!found) return NextResponse.json({ kind: "no-match" });
-
-  if (found.media_type === "movie") {
-    const details = await getMovieDetails(found.id);
-    return NextResponse.json({
+  if (item.type === "movie") {
+    const m = await catalog.movie(item);
+    if (!m.tmdbId) return unplayable(m.title);
+    return {
       kind: "result",
-      result: {
-        ok: true,
-        mediaType: "movie",
-        tmdbId: found.id,
-        showTitle: details.title,
-        year: (details.release_date || "").slice(0, 4),
-        streamUrl: streamUrlMovie(found.id),
-      },
-    });
+      reply: intent.reply || `Playing ${m.title}${m.year ? ` (${m.year})` : ""}.`,
+      result: { mediaType: "movie", tmdbId: m.tmdbId, imdbId: m.imdbId, showTitle: m.title, year: m.year },
+    };
   }
+  return playShow(await catalog.show(item), intent, intent.reply);
+}
 
-  const details = await getTvDetails(found.id);
-  let s = season, e = episode;
-  if (finale) s = details.number_of_seasons;
-  if (!s) s = 1;
-  const seasonData = await getSeasonDetails(found.id, s);
-  if (finale) e = seasonData.episodes.length;
-  if (!e) e = 1;
-  const epObj = seasonData.episodes.find((ep) => ep.episode_number === e) || seasonData.episodes[0];
+async function playShow(show, { season, episode, which }, reply) {
+  if (!show.tmdbId) return unplayable(show.title);
+  const nums = show.seasonNums.length ? show.seasonNums : [1];
+  let s = season;
+  if (which === "finale" || which === "lastSeason") s = s || nums[nums.length - 1];
+  if (which === "pilot") { s = s || 1; episode = 1; }
+  if (!nums.includes(s)) {
+    if (s) {
+      const eps = await show.loadSeason(nums[0]);
+      return { ...(build(show, nums[0], eps, 1)), reply: `${show.title} only has ${nums.length} season${nums.length > 1 ? "s" : ""} — starting from the top.` };
+    }
+    s = nums[0];
+  }
+  const eps = await show.loadSeason(s);
+  let e = episode || 1;
+  if (which === "finale") e = eps[eps.length - 1]?.episode || 1;
+  if (episode && !eps.some((x) => x.episode === episode)) {
+    return { ...(build(show, s, eps, eps[eps.length - 1]?.episode || 1)), reply: `Season ${s} only goes to episode ${eps.length} — here's the last one.` };
+  }
+  return build(show, s, eps, e, reply);
+}
 
-  return NextResponse.json({
+function build(show, s, eps, e, reply) {
+  const ep = eps.find((x) => x.episode === e) || eps[0] || { episode: e, title: `Episode ${e}` };
+  return {
     kind: "result",
+    reply: reply || `${show.title} — S${s}E${ep.episode}${ep.title && !/^Episode \d+$/.test(ep.title) ? `, "${ep.title}"` : ""}.`,
     result: {
-      ok: true,
       mediaType: "tv",
-      tmdbId: found.id,
-      showTitle: details.name,
+      tmdbId: show.tmdbId,
+      imdbId: show.imdbId,
+      showTitle: show.title,
       season: s,
-      episode: epObj.episode_number,
-      episodeTitle: epObj.name,
-      totalSeasons: details.number_of_seasons,
-      seasonEpisodes: seasonData.episodes.map((ep) => ({ episode: ep.episode_number, title: ep.name })),
-      streamUrl: streamUrlTv(found.id, s, epObj.episode_number),
+      episode: ep.episode,
+      episodeTitle: ep.title,
+      totalSeasons: show.seasonNums.length || 1,
+      seasonEpisodes: eps,
     },
-  });
+  };
 }
 
-async function stepTmdbEpisode(lr, dir) {
-  const details = await getTvDetails(lr.tmdbId);
-  let season = lr.season;
-  let seasonData = await getSeasonDetails(lr.tmdbId, season);
-  let epIdx = seasonData.episodes.findIndex((ep) => ep.episode_number === lr.episode) + dir;
-
-  if (epIdx >= seasonData.episodes.length) {
-    if (season + 1 <= details.number_of_seasons) { season++; seasonData = await getSeasonDetails(lr.tmdbId, season); epIdx = 0; }
-    else epIdx = seasonData.episodes.length - 1;
-  } else if (epIdx < 0) {
-    if (season - 1 >= 1) { season--; seasonData = await getSeasonDetails(lr.tmdbId, season); epIdx = seasonData.episodes.length - 1; }
-    else epIdx = 0;
+async function stepEpisode(lr, dir, reply) {
+  const show = await catalog.show({ tmdbId: lr.tmdbId, imdbId: lr.imdbId, type: "tv", title: lr.title });
+  const nums = show.seasonNums.length ? show.seasonNums : [lr.season];
+  let s = lr.season;
+  let eps = await show.loadSeason(s);
+  let idx = eps.findIndex((x) => x.episode === lr.episode) + dir;
+  if (idx >= eps.length) {
+    const ns = nums[nums.indexOf(s) + 1];
+    if (!ns) return { ...build(show, s, eps, lr.episode), reply: `That's the last episode of ${show.title} — want something like it?` };
+    s = ns; eps = await show.loadSeason(s); idx = 0;
+  } else if (idx < 0) {
+    const ps = nums[nums.indexOf(s) - 1];
+    if (!ps) return { ...build(show, s, eps, lr.episode), reply: "Already at the very first episode." };
+    s = ps; eps = await show.loadSeason(s); idx = eps.length - 1;
   }
-  const ep = seasonData.episodes[epIdx];
+  return build(show, s, eps, eps[idx].episode, reply);
+}
+
+function unplayable(title) {
+  return { kind: "no-match", reply: `Found ${title}, but none of the servers carry it yet. Try another title.` };
+}
+
+// ---------------- recommendations ----------------
+async function recommend(intent, context) {
+  const seen = new Set((context.suggested || []).map((t) => t.toLowerCase()));
+  const rec = { genre: intent.genre || null, type: intent.type || null, similarTo: intent.similarTo || null };
+  let picks = [];
+
+  if (intent.recs?.length) {
+    // LLM-picked titles: confirm each one exists before showing it.
+    const found = await Promise.all(
+      intent.recs.slice(0, 6).map((r) => catalog.findOne(r.title, { type: r.type, year: r.year }).catch(() => null))
+    );
+    picks = found.filter(Boolean);
+  }
+
+  if (picks.length < 3) {
+    let pool = [];
+    if (rec.similarTo) {
+      const base = await catalog.findOne(rec.similarTo).catch(() => null);
+      if (base) {
+        const full = base.type === "movie" ? await catalog.movie(base) : await catalog.show(base);
+        pool = await catalog.similar({ ...base, ...full });
+        rec.basedOn = full.title;
+      }
+    }
+    if (!pool.length) pool = await catalog.discover({ type: rec.type, genre: rec.genre });
+    picks = [...picks, ...shuffle(pool.filter((p) => !seen.has(p.title.toLowerCase())).slice(0, 16))];
+  }
+
+  const unique = [];
+  for (const p of picks) {
+    const key = p.title.toLowerCase();
+    if (seen.has(key) || unique.some((u) => u.title.toLowerCase() === key)) continue;
+    unique.push(p);
+    if (unique.length === 4) break;
+  }
+  if (!unique.length) return { kind: "chat", reply: "I've run out of fresh picks for that — try a different mood or genre." };
+
+  const what = [rec.genre?.toLowerCase(), rec.type === "movie" ? "movies" : rec.type === "tv" ? "shows" : "picks"].filter(Boolean).join(" ");
+  const reply =
+    intent.reply ||
+    (rec.basedOn ? `If you liked ${rec.basedOn}, try one of these.` : intent.more ? "Here's another batch." : rec.genre || rec.type ? `A few ${what} worth a shot:` : "Popular right now:");
+
   return {
-    kind: "result",
-    result: {
-      ok: true, mediaType: "tv", tmdbId: lr.tmdbId, showTitle: details.name,
-      season, episode: ep.episode_number, episodeTitle: ep.name,
-      totalSeasons: details.number_of_seasons,
-      seasonEpisodes: seasonData.episodes.map((e) => ({ episode: e.episode_number, title: e.name })),
-      streamUrl: streamUrlTv(lr.tmdbId, season, ep.episode_number),
-    },
+    kind: "suggestion",
+    reply,
+    rec,
+    suggestions: unique.map((p) => ({
+      title: p.title,
+      type: p.type,
+      year: p.year,
+      query: `${p.title}${p.year ? ` ${p.year}` : ""}${p.type === "movie" ? " movie" : ""}`,
+    })),
   };
 }
 
-async function jumpTmdbSeason(lr, targetSeason) {
-  const details = await getTvDetails(lr.tmdbId);
-  if (targetSeason > details.number_of_seasons || targetSeason < 1) return null;
-  const seasonData = await getSeasonDetails(lr.tmdbId, targetSeason);
-  const ep = seasonData.episodes[0];
-  return {
-    kind: "result",
-    result: {
-      ok: true, mediaType: "tv", tmdbId: lr.tmdbId, showTitle: details.name,
-      season: targetSeason, episode: ep.episode_number, episodeTitle: ep.name,
-      totalSeasons: details.number_of_seasons,
-      seasonEpisodes: seasonData.episodes.map((e) => ({ episode: e.episode_number, title: e.name })),
-      streamUrl: streamUrlTv(lr.tmdbId, targetSeason, ep.episode_number),
-    },
-  };
+function shuffle(a) {
+  const arr = [...a];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
-// ============================================================
-// Fallback path — no TMDB_API_KEY set, uses the hardcoded/Supabase library
-// ============================================================
-async function handleFallback(query, context) {
+// ---------------- last resort: hardcoded library ----------------
+async function offline(query, context) {
   const library = await getLibrary();
-
-  const followup = tryFollowup(library, query, context);
-  if (followup) {
-    if (followup.type === "result" && followup.result) {
-      return NextResponse.json({ kind: "result", result: followup.result });
-    }
-    if (followup.type === "suggestion") {
-      const { text, slugs } = buildSuggestionReply(library, context?.lastSuggestionSlugs || []);
-      return NextResponse.json({ kind: "suggestion", text, slugs });
-    }
-  }
-
-  if (isSuggestionQuery(query)) {
-    const { text, slugs } = buildSuggestionReply(library, context?.lastSuggestionSlugs || []);
-    return NextResponse.json({ kind: "suggestion", text, slugs });
-  }
-
-  const result = resolveQuery(library, query);
-  if (result.ok) return NextResponse.json({ kind: "result", result });
-
-  const hasEpisodeMarkers = /s\d{1,2}\s*e\d{1,3}|\d{1,2}x\d{1,3}|season\s*\d|episode\s*\d|finale|pilot/i.test(query);
-  if (!hasEpisodeMarkers) {
-    const { text, slugs } = buildSuggestionReply(library, context?.lastSuggestionSlugs || []);
-    return NextResponse.json({ kind: "fallback-suggestion", text, slugs });
-  }
-
-  return NextResponse.json({ kind: "no-match" });
+  const follow = tryFollowup(library, query, { lastResult: context.lastResult, lastSuggestionSlugs: [] });
+  if (follow?.type === "result" && follow.result) return { kind: "result", reply: "Here you go.", result: follow.result };
+  const r = resolveQuery(library, query);
+  if (r.ok) return { kind: "result", reply: `${r.showTitle} — S${r.season}E${r.episode}.`, result: r };
+  const { text } = buildSuggestionReply(library, []);
+  return { kind: "chat", reply: `The catalog is having a moment, so search is limited. ${text}` };
 }

@@ -3,38 +3,51 @@ import { useEffect, useRef, useState } from "react";
 import Starfield from "@/components/Starfield";
 import RingParticle from "@/components/RingParticle";
 import WaveDivider from "@/components/WaveDivider";
+import Player from "@/components/Player";
 
 const PLACEHOLDER_PHRASES = [
   "dexter season 3 episode 2",
-  "breaking bad finale",
+  "something funny for tonight",
   "the office s2 e1",
+  "something like breaking bad",
   "severance",
+  "a scary movie",
 ];
 
 const EXAMPLE_CHIPS = [
   { label: "DEXTER S3E2", q: "Dexter season 3 episode 2" },
   { label: "BREAKING BAD FINALE", q: "breaking bad finale" },
-  { label: "THE OFFICE S2E1", q: "the office s2 e1" },
-  { label: "SEVERANCE", q: "severance" },
+  { label: "SOMETHING FUNNY", q: "something funny" },
+  { label: "LIKE SEVERANCE", q: "something like severance" },
 ];
 
-function streamUrlFor(result) {
-  return result.streamUrl;
+function readStore(key, fallback) {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch { return fallback; }
 }
+function writeStore(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage blocked */ }
+}
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+let bubbleSeq = 0;
 
 export default function Page() {
   const [query, setQuery] = useState("");
   const [focused, setFocused] = useState(false);
   const [placeholder, setPlaceholder] = useState("");
-  const [thread, setThread] = useState([]); // {text, found, error}
+  const [thread, setThread] = useState([]); // {id, role, text, found, error, suggestions}
+  const [busy, setBusy] = useState(false);
   const [step, setStep] = useState(1);
   const [result, setResult] = useState(null); // current rendered result
   const [recall, setRecall] = useState(null);
   const [watchlistLabel, setWatchlistLabel] = useState("+ Watchlist");
 
-  const contextRef = useRef({ lastResult: null, lastSuggestionSlugs: [], lastSuggestionIds: [] });
+  // Conversation memory sent with every request so follow-ups ("next", "another one") resolve.
+  const contextRef = useRef({ lastResult: null, lastRec: null, suggested: [] });
+  const historyRef = useRef([]); // [{role, text}]
   const inputRef = useRef(null);
   const resultRef = useRef(null);
+  const threadEndRef = useRef(null);
 
   // typewriter placeholder
   useEffect(() => {
@@ -64,8 +77,7 @@ export default function Page() {
 
   // load continue-watching from localStorage on mount
   useEffect(() => {
-    const raw = localStorage.getItem("void_continue");
-    if (raw) setRecall(JSON.parse(raw));
+    setRecall(readStore("void_continue", null));
   }, []);
 
   // auto-scroll down to the player once a result is actually rendered
@@ -75,115 +87,118 @@ export default function Page() {
     }
   }, [result]);
 
-  function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  useEffect(() => {
+    if (!result) threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [thread, result]);
 
   function addBubble(text, opts = {}) {
-    setThread((prev) => [...prev, { text, ...opts }]);
+    const id = ++bubbleSeq;
+    setThread((prev) => [...prev, { id, text, ...opts }]);
+    return id;
   }
 
+  function patchBubble(id, patch) {
+    setThread((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  }
+
+  // Types a reply into its own bubble (by id, so overlapping replies can't clobber each other).
   async function typeBubble(text, opts = {}) {
-    const idx = thread.length;
-    setThread((prev) => [...prev, { text: "", ...opts }]);
-    for (let i = 1; i <= text.length; i++) {
-      await wait(16);
-      setThread((prev) => {
-        const copy = [...prev];
-        copy[idx] = { ...copy[idx], text: text.slice(0, i) };
-        return copy;
-      });
+    const id = addBubble("", opts);
+    const stepSize = Math.max(1, Math.ceil(text.length / 90));
+    for (let i = stepSize; i < text.length + stepSize; i += stepSize) {
+      await wait(14);
+      patchBubble(id, { text: text.slice(0, i) });
     }
+    return id;
   }
 
-  async function runQuery(raw) {
-    raw = (raw || "").trim();
-    if (!raw) return;
+  function remember(role, text) {
+    historyRef.current = [...historyRef.current, { role, text }].slice(-12);
+  }
 
-    setResult(null);
+  async function ask(raw) {
+    const res = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: raw, context: contextRef.current, history: historyRef.current }),
+    });
+    return res.json();
+  }
+
+  async function runQuery(raw, { silent = false } = {}) {
+    raw = (raw || "").trim();
+    if (!raw || busy) return;
+    setBusy(true);
+    setQuery("");
     setRecall(null);
-    addBubble(`Searching "${raw}"…`);
-    await wait(360);
+    if (!silent) addBubble(raw, { role: "user" });
+    remember("user", raw);
+    const pending = addBubble("Thinking…", { pending: true });
 
     let data;
     try {
-      const res = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: raw, context: contextRef.current }),
-      });
-      data = await res.json();
+      data = await ask(raw);
     } catch {
+      setThread((prev) => prev.filter((b) => b.id !== pending));
       await typeBubble("Couldn't reach the search service — check your connection and try again.", { error: true });
+      setBusy(false);
       return;
     }
+    setThread((prev) => prev.filter((b) => b.id !== pending));
+
+    const reply = data.reply || "";
+    remember("assistant", reply + (data.suggestions ? ` [suggested: ${data.suggestions.map((s) => s.title).join(", ")}]` : ""));
 
     if (data.kind === "result") {
-      addBubble("Match found.");
-      await wait(260);
-      addBubble(`Found: ${data.result.showTitle} — Season ${data.result.season} Episode ${data.result.episode}`, { found: true });
-      await wait(260);
+      await typeBubble(reply, { found: true });
       renderResult(data.result);
-      return;
+    } else if (data.kind === "suggestion") {
+      contextRef.current.lastRec = data.rec || null;
+      contextRef.current.suggested = [...contextRef.current.suggested, ...data.suggestions.map((s) => s.title)].slice(-40);
+      await typeBubble(reply, { found: true });
+      addBubble("", { suggestions: data.suggestions });
+      setTimeout(() => threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+    } else {
+      await typeBubble(reply || "Not sure what you meant — try a title or a mood.", { error: data.kind === "no-match" });
     }
-
-    if (data.kind === "suggestion" || data.kind === "fallback-suggestion") {
-      if (data.kind === "fallback-suggestion") {
-        await typeBubble("Couldn't pin that to a title in the library — here's what's available instead.", {});
-      }
-      if (data.slugs) contextRef.current.lastSuggestionSlugs = data.slugs;
-      if (data.ids) contextRef.current.lastSuggestionIds = data.ids;
-      await typeBubble(data.text, { found: true });
-      return;
-    }
-
-    await typeBubble('No clean match — try a show name, e.g. "Dexter season 3 episode 2", or ask "what should I watch?"', { error: true });
+    setBusy(false);
+    inputRef.current?.focus({ preventScroll: true });
   }
 
   function renderResult(r) {
-    contextRef.current.lastResult =
-      r.mediaType === "movie"
-        ? { mediaType: "movie", tmdbId: r.tmdbId }
-        : { mediaType: "tv", showSlug: r.showSlug, tmdbId: r.tmdbId, season: r.season, episode: r.episode };
+    contextRef.current.lastResult = {
+      mediaType: r.mediaType, tmdbId: r.tmdbId, imdbId: r.imdbId, title: r.showTitle,
+      ...(r.mediaType === "tv" ? { season: r.season, episode: r.episode, showSlug: r.showSlug } : {}),
+    };
     setResult(r);
     setStep(2);
 
-    if (r.mediaType === "movie") {
-      localStorage.setItem("void_continue", JSON.stringify({
-        mediaType: "movie", tmdbId: r.tmdbId, title: r.showTitle, year: r.year,
-      }));
-    } else {
-      localStorage.setItem("void_continue", JSON.stringify({
-        mediaType: "tv", slug: r.showSlug, tmdbId: r.tmdbId, season: r.season, episode: r.episode,
-        title: r.showTitle, episodeTitle: r.episodeTitle,
-      }));
-    }
+    writeStore("void_continue", r.mediaType === "movie"
+      ? { mediaType: "movie", tmdbId: r.tmdbId, title: r.showTitle, year: r.year }
+      : { mediaType: "tv", tmdbId: r.tmdbId, season: r.season, episode: r.episode, title: r.showTitle, episodeTitle: r.episodeTitle });
   }
 
-  async function jumpToEpisode(targetEpisode) {
-    if (!result) return;
+  // Episode strip / season pills: ask in context so the server resolves against the show on screen.
+  async function jumpTo(text) {
+    if (!result || busy) return;
+    setBusy(true);
     try {
-      const res = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: `${result.showTitle} season ${result.season} episode ${targetEpisode}`,
-          context: contextRef.current,
-        }),
-      });
-      const data = await res.json();
+      const data = await ask(text);
       if (data.kind === "result") renderResult(data.result);
     } catch {
       /* silent — strip click is a convenience action, main search path still works */
     }
+    setBusy(false);
   }
 
   function resetToConsole() {
     setResult(null);
     setThread([]);
     setQuery("");
-    contextRef.current = { lastResult: null, lastSuggestionSlugs: [], lastSuggestionIds: [] };
+    contextRef.current = { lastResult: null, lastRec: null, suggested: [] };
+    historyRef.current = [];
     setStep(1);
-    const raw = localStorage.getItem("void_continue");
-    if (raw) setRecall(JSON.parse(raw));
+    setRecall(readStore("void_continue", null));
     inputRef.current?.focus();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -191,9 +206,9 @@ export default function Page() {
   function saveWatchlist() {
     if (!result) return;
     const key = result.tmdbId ?? result.showSlug;
-    const list = JSON.parse(localStorage.getItem("void_watchlist") || "[]");
+    const list = readStore("void_watchlist", []);
     if (!list.includes(key)) list.push(key);
-    localStorage.setItem("void_watchlist", JSON.stringify(list));
+    writeStore("void_watchlist", list);
     setWatchlistLabel("ADDED ✓");
     setTimeout(() => setWatchlistLabel("+ Watchlist"), 1400);
   }
@@ -216,10 +231,10 @@ export default function Page() {
         <div className="heroGrid">
           <div className="heroLeft">
             <div className="eyebrow">01 — SEARCH</div>
-            <h1 className="heroTitle">Tonights<br />the <em>Night.</em></h1>
+            <h1 className="heroTitle">Tonight&apos;s<br />the <em>Night.</em></h1>
             <p className="heroSub">
-              No browsing, no rows, no menus — say what you want and the system finds it.
-              Ask for a show, an episode, or just say you don&apos;t know what to watch.
+              No browsing, no rows, no menus — just say what you want. Name a show or an episode,
+              describe a mood, or ask for something like a show you already love.
             </p>
 
             <div className={`inputShell ${focused ? "focused" : ""}`}>
@@ -235,13 +250,13 @@ export default function Page() {
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={onKeyDown}
                 />
-                <button className="goBtn" onClick={() => runQuery(query)}>Find</button>
+                <button className="goBtn" onClick={() => runQuery(query)} disabled={busy}>{busy ? "…" : "Find"}</button>
               </div>
             </div>
 
             <div className="examples">
               {EXAMPLE_CHIPS.map((c) => (
-                <div key={c.label} className="chip" onClick={() => { setQuery(c.q); runQuery(c.q); }}>
+                <div key={c.label} className="chip" onClick={() => runQuery(c.q)}>
                   {c.label}
                 </div>
               ))}
@@ -278,12 +293,24 @@ export default function Page() {
 
         {thread.length > 0 && (
           <div className="threadView show">
-            {thread.map((b, i) => (
-              <div key={i} className={`bubble ${b.found ? "found" : ""} ${b.error ? "error" : ""}`}>
-                <span className="dot" />
-                <span>{b.text}</span>
-              </div>
-            ))}
+            {thread.map((b) =>
+              b.suggestions ? (
+                <div key={b.id} className="suggestRow">
+                  {b.suggestions.map((sug) => (
+                    <button key={sug.title + sug.year} className="suggestChip" onClick={() => runQuery(sug.query)} disabled={busy}>
+                      <b>{sug.title}</b>
+                      <span>{[sug.year, sug.type === "movie" ? "Film" : "Series"].filter(Boolean).join(" · ")}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div key={b.id} className={`bubble ${b.role === "user" ? "user" : ""} ${b.found ? "found" : ""} ${b.error ? "error" : ""} ${b.pending ? "pending" : ""}`}>
+                  <span className="dot" />
+                  <span>{b.text}</span>
+                </div>
+              )
+            )}
+            <div ref={threadEndRef} />
           </div>
         )}
       </section>
@@ -312,12 +339,7 @@ export default function Page() {
                 </div>
                 <WaveDivider />
               </div>
-              <div className="playerCol">
-                <iframe
-                  src={streamUrlFor(result)}
-                  allowFullScreen
-                />
-              </div>
+              <Player result={result} />
               <div className="playerNote">
                 Some clicks inside the player may trigger a pop-up or redirect — that comes
                 from the embed itself, not this app. Running an ad blocker like{" "}
@@ -325,13 +347,22 @@ export default function Page() {
                 {" "}(or using Brave, which has one built in) stops it cleanly.
               </div>
             </div>
+            {result.mediaType === "tv" && result.totalSeasons > 1 && (
+              <div className="seasonRow">
+                {Array.from({ length: result.totalSeasons }, (_, i) => i + 1).map((n) => (
+                  <button key={n} className={`seasonPill ${n === result.season ? "active" : ""}`} onClick={() => jumpTo(`season ${n}`)}>
+                    S{n}
+                  </button>
+                ))}
+              </div>
+            )}
             {result.mediaType === "tv" && result.seasonEpisodes?.length > 0 && (
               <div className="epStrip">
                 {result.seasonEpisodes.map((ep) => (
                   <div
                     key={ep.episode}
                     className={`epChip ${ep.episode === result.episode ? "active" : ""}`}
-                    onClick={() => jumpToEpisode(ep.episode)}
+                    onClick={() => jumpTo(`season ${result.season} episode ${ep.episode}`)}
                   >
                     <div className="n">EP {ep.episode}</div>
                     <div className="t">{ep.title}</div>
@@ -339,6 +370,14 @@ export default function Page() {
                 ))}
               </div>
             )}
+            <div className="followBar">
+              <input
+                type="text"
+                placeholder={result.mediaType === "tv" ? "next · season 3 · the finale · something like this…" : "something like this · another movie…"}
+                onKeyDown={(e) => { if (e.key === "Enter" && e.currentTarget.value.trim()) { const v = e.currentTarget.value; e.currentTarget.value = ""; runQuery(v); } }}
+              />
+            </div>
+            {thread.length > 0 && <div className="followReply">{thread.filter((b) => !b.suggestions && b.role !== "user" && !b.pending).slice(-1)[0]?.text}</div>}
           </div>
         </section>
       )}
