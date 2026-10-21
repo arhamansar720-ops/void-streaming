@@ -7,6 +7,9 @@ import Player from "@/components/Player";
 import { AnimatePresence, motion } from "motion/react";
 import BlurText from "@/components/reactbits/BlurText";
 import SpotlightCard from "@/components/reactbits/SpotlightCard";
+import { getHistory, recordWatch, removeFromHistory, clearHistory, watchedEpisodes, timeAgo } from "@/lib/history";
+
+const RESUME = /^(resume|continue|continue watching|keep watching|pick up where i left off|where (i|we) left off|what was i watching)\b/i;
 
 const PLACEHOLDER_PHRASES = [
   "dexter season 3 episode 2",
@@ -42,11 +45,13 @@ export default function Page() {
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState(1);
   const [result, setResult] = useState(null); // current rendered result
-  const [recall, setRecall] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [watched, setWatched] = useState({}); // "s-e" -> ts for the show on screen
   const [watchlistLabel, setWatchlistLabel] = useState("+ Watchlist");
 
   // Conversation memory sent with every request so follow-ups ("next", "another one") resolve.
-  const contextRef = useRef({ lastResult: null, lastRec: null, suggested: [] });
+  const contextRef = useRef({ lastResult: null, lastRec: null, suggested: [], watched: [] });
   const historyRef = useRef([]); // [{role, text}]
   const inputRef = useRef(null);
   const resultRef = useRef(null);
@@ -80,7 +85,9 @@ export default function Page() {
 
   // load continue-watching from localStorage on mount
   useEffect(() => {
-    setRecall(readStore("void_continue", null));
+    const h = getHistory();
+    setHistory(h);
+    contextRef.current.watched = h.slice(0, 30).map((e) => e.title);
   }, []);
 
   // auto-scroll down to the player once a result is actually rendered
@@ -131,9 +138,13 @@ export default function Page() {
   async function runQuery(raw, { silent = false } = {}) {
     raw = (raw || "").trim();
     if (!raw || busy) return;
+    if (RESUME.test(raw) && history[0]) {
+      setQuery("");
+      addBubble(raw, { role: "user" });
+      return playHistory(history[0]);
+    }
     setBusy(true);
     setQuery("");
-    setRecall(null);
     if (!silent) addBubble(raw, { role: "user" });
     remember("user", raw);
     const pending = addBubble("Thinking…", { pending: true });
@@ -174,11 +185,46 @@ export default function Page() {
       ...(r.mediaType === "tv" ? { season: r.season, episode: r.episode, showSlug: r.showSlug } : {}),
     };
     setResult(r);
+    setWatched(watchedEpisodes(r.mediaType, r.tmdbId));
     setStep(2);
+  }
 
-    writeStore("void_continue", r.mediaType === "movie"
-      ? { mediaType: "movie", tmdbId: r.tmdbId, title: r.showTitle, year: r.year }
-      : { mediaType: "tv", tmdbId: r.tmdbId, season: r.season, episode: r.episode, title: r.showTitle, episodeTitle: r.episodeTitle });
+  // Called by the player once a server is actually streaming — that's what counts as "watched".
+  function onLive(serverId) {
+    if (!result) return;
+    const h = recordWatch(result, serverId);
+    setHistory(h);
+    setWatched(watchedEpisodes(result.mediaType, result.tmdbId));
+    contextRef.current.watched = h.slice(0, 30).map((e) => e.title);
+  }
+
+  // Resume straight from history: ask the server in the context of that show, no re-search.
+  async function playHistory(entry, { next = false } = {}) {
+    if (busy) return;
+    setBusy(true);
+    setHistoryOpen(false);
+    contextRef.current.lastResult = {
+      mediaType: entry.mediaType, tmdbId: entry.tmdbId, imdbId: entry.imdbId, title: entry.title,
+      ...(entry.mediaType === "tv" ? { season: entry.season, episode: entry.episode } : {}),
+    };
+    const ask_ = entry.mediaType === "tv"
+      ? next ? "next" : `season ${entry.season} episode ${entry.episode}`
+      : `${entry.title}${entry.year ? ` ${entry.year}` : ""} movie`;
+    const pending = addBubble(`Resuming ${entry.title}…`, { pending: true });
+    try {
+      const data = await ask(ask_);
+      setThread((prev) => prev.filter((b) => b.id !== pending));
+      if (data.kind === "result") {
+        addBubble(data.reply, { found: true });
+        renderResult(data.result);
+      } else {
+        addBubble(data.reply || "Couldn't resume that one.", { error: true });
+      }
+    } catch {
+      setThread((prev) => prev.filter((b) => b.id !== pending));
+      addBubble("Couldn't reach the search service.", { error: true });
+    }
+    setBusy(false);
   }
 
   // Episode strip / season pills: ask in context so the server resolves against the show on screen.
@@ -198,10 +244,9 @@ export default function Page() {
     setResult(null);
     setThread([]);
     setQuery("");
-    contextRef.current = { lastResult: null, lastRec: null, suggested: [] };
+    contextRef.current = { lastResult: null, lastRec: null, suggested: [], watched: history.slice(0, 30).map((e) => e.title) };
     historyRef.current = [];
     setStep(1);
-    setRecall(readStore("void_continue", null));
     inputRef.current?.focus();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -227,6 +272,8 @@ export default function Page() {
         <div className="sep" />
         <div className={`step ${step === 1 ? "active" : ""}`}>01 — SEARCH</div>
         <div className={`step ${step === 2 ? "active" : ""}`}>02 — PLAYBACK</div>
+        <div className="sep" />
+        <button className="step navBtn" onClick={() => setHistoryOpen(true)}>HISTORY</button>
       </nav>
 
       <section className="view">
@@ -268,29 +315,33 @@ export default function Page() {
               ))}
             </div>
 
-            {recall && !result && (
-              <div className="recall">
-                <div className="label">Continue Watching</div>
-                <div
-                  className="recallChip"
-                  onClick={() =>
-                    runQuery(
-                      recall.mediaType === "movie"
-                        ? recall.title
-                        : `${recall.title} season ${recall.season} episode ${recall.episode}`
-                    )
-                  }
-                >
-                  <div className="meta">
-                    <b>{recall.title}</b>
-                    <span>
-                      {recall.mediaType === "movie"
-                        ? `RESUME · ${recall.year || ""}`
-                        : `RESUME · S${recall.season}E${recall.episode} — ${recall.episodeTitle}`}
-                    </span>
-                  </div>
+            {history.length > 0 && !result && (
+              <motion.div className="history" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}>
+                <div className="historyHead">
+                  <div className="label">Continue Watching</div>
+                  <button className="linkBtn" onClick={() => setHistoryOpen(true)}>History ({history.length}) →</button>
                 </div>
-              </div>
+                <div className="historyRow">
+                  {history.slice(0, 8).map((e, i) => (
+                    <motion.div
+                      key={e.key}
+                      initial={{ opacity: 0, x: 16 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.55 + i * 0.05 }}
+                    >
+                      <SpotlightCard as="button" className="histCard" onClick={() => playHistory(e)} disabled={busy}>
+                        {e.backdrop && <img src={e.backdrop} alt="" loading="lazy" />}
+                        <div className="histMeta">
+                          <b>{e.title}</b>
+                          <span>
+                            {e.mediaType === "tv" ? `S${e.season}E${e.episode}` : e.year || "Film"} · {timeAgo(e.watchedAt)}
+                          </span>
+                        </div>
+                      </SpotlightCard>
+                    </motion.div>
+                  ))}
+                </div>
+              </motion.div>
             )}
           </div>
         </div>
@@ -366,7 +417,7 @@ export default function Page() {
                 </div>
                 <WaveDivider />
               </div>
-              <Player result={result} />
+              <Player result={result} onLive={onLive} />
               <div className="playerNote">
                 Some clicks inside the player may trigger a pop-up or redirect — that comes
                 from the embed itself, not this app. Running an ad blocker like{" "}
@@ -388,7 +439,7 @@ export default function Page() {
                 {result.seasonEpisodes.map((ep) => (
                   <div
                     key={ep.episode}
-                    className={`epChip ${ep.episode === result.episode ? "active" : ""}`}
+                    className={`epChip ${ep.episode === result.episode ? "active" : ""} ${watched[`${result.season}-${ep.episode}`] ? "seen" : ""}`}
                     onClick={() => jumpTo(`season ${result.season} episode ${ep.episode}`)}
                   >
                     <div className="n">EP {ep.episode}</div>
@@ -408,6 +459,69 @@ export default function Page() {
           </div>
         </section>
       )}
+
+      <AnimatePresence>
+        {historyOpen && (
+          <motion.div className="historyScrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setHistoryOpen(false)}>
+            <motion.aside
+              className="historyPanel"
+              initial={{ x: "100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "100%" }}
+              transition={{ type: "spring", stiffness: 320, damping: 36 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="historyPanelHead">
+                <div>
+                  <div className="eyebrow">Watch history</div>
+                  <h3>{history.length} title{history.length === 1 ? "" : "s"}</h3>
+                </div>
+                <button className="linkBtn" onClick={() => setHistoryOpen(false)}>Close ✕</button>
+              </div>
+              <motion.ul className="historyList" initial="h" animate="s" variants={{ s: { transition: { staggerChildren: 0.03 } } }}>
+                <AnimatePresence initial={false}>
+                  {history.map((e) => (
+                    <motion.li
+                      key={e.key}
+                      layout
+                      variants={{ h: { opacity: 0, x: 20 }, s: { opacity: 1, x: 0 } }}
+                      exit={{ opacity: 0, x: 40, height: 0, marginBottom: 0 }}
+                      className="historyItem"
+                    >
+                      <button className="historyMain" onClick={() => playHistory(e)}>
+                        {e.poster ? <img src={e.poster} alt="" loading="lazy" /> : <div className="noPoster" />}
+                        <div>
+                          <b>{e.title}</b>
+                          <span>
+                            {e.mediaType === "tv"
+                              ? `S${e.season}E${e.episode}${e.episodeTitle && !/^Episode \d+$/.test(e.episodeTitle) ? ` · ${e.episodeTitle}` : ""}`
+                              : e.year || "Film"}
+                          </span>
+                          <span>
+                            {timeAgo(e.watchedAt)}
+                            {e.mediaType === "tv" && ` · ${Object.keys(e.episodes || {}).length} episode${Object.keys(e.episodes || {}).length === 1 ? "" : "s"} watched`}
+                          </span>
+                        </div>
+                      </button>
+                      <div className="historyActions">
+                        {e.mediaType === "tv" && <button className="linkBtn" onClick={() => playHistory(e, { next: true })}>Next ep →</button>}
+                        <button className="linkBtn dim" onClick={() => setHistory(removeFromHistory(e.key))} aria-label={`Remove ${e.title}`}>Remove</button>
+                      </div>
+                    </motion.li>
+                  ))}
+                </AnimatePresence>
+              </motion.ul>
+              {history.length > 0 ? (
+                <button className="pillBtn clearBtn" onClick={() => { if (confirm("Clear your whole watch history?")) setHistory(clearHistory()); }}>
+                  Clear history
+                </button>
+              ) : (
+                <p className="historyEmpty">Nothing yet — anything you play shows up here.</p>
+              )}
+            </motion.aside>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <footer>void · query-driven media · void chromatic system</footer>
     </main>

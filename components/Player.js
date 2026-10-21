@@ -1,26 +1,24 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import { SERVERS, embedUrl } from "@/lib/servers";
 import ShinyText from "@/components/reactbits/ShinyText";
+
+// Flow: scan (blur + sweep through every server while /api/servers checks this exact title)
+//    → connect (winner expanded, iframe loading under the blur)
+//    → live (blur lifts, the server pills glide down under the player)
+// A hang during connect re-veils the player and sweeps on to the next server.
 
 const PREF_KEY = "void_server";
 const FAILS_KEY = "void_server_fails";
 const LOAD_TIMEOUT_MS = 12000;
 const FAIL_MEMORY_MS = 30 * 60 * 1000; // a server that hung is tried last for 30 min
-const SWITCH_PAUSE_MS = 900; // long enough to read "switching…"
+const SCAN_STEP_MS = 150;
+const SWITCH_STEP_MS = 110;
+const PROBE_WAIT_MS = 5000;
+const MIN_CONNECT_MS = 900; // let the winning pill sit expanded before the blur lifts
 
-// One health request per page session, shared across every result.
-let healthPromise = null;
-function getHealth() {
-  if (!healthPromise) {
-    healthPromise = fetch("/api/servers")
-      .then((r) => r.json())
-      .then((d) => Object.fromEntries(d.servers.map((s) => [s.id, s.up])))
-      .catch(() => ({}));
-  }
-  return healthPromise;
-}
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function read(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
@@ -33,266 +31,276 @@ function recentFails() {
   return Object.fromEntries(Object.entries(read(FAILS_KEY, {})).filter(([, at]) => now - at < FAIL_MEMORY_MS));
 }
 
-// Preferred → healthy → recently hung → reported dead.
-function orderServers(health, pref, fails) {
-  const tier = (s) => (health[s.id] === false ? 3 : fails[s.id] ? 2 : s.id === pref ? 0 : 1);
+// Preferred first, recently hung last. Fixed for the whole run so pills never jump around mid-sweep.
+function orderServers() {
+  const pref = read(PREF_KEY, null);
+  const fails = recentFails();
+  const tier = (s) => (fails[s.id] ? 2 : s.id === pref ? 0 : 1);
   return [...SERVERS].sort((a, b) => tier(a) - tier(b));
 }
 
-const STATUS_LABEL = { connecting: "connecting", live: "live", switching: "switching", exhausted: "no response" };
+function probeUrl(r) {
+  return r.mediaType === "tv"
+    ? `/api/servers?type=tv&id=${r.tmdbId}&s=${r.season}&e=${r.episode}`
+    : `/api/servers?type=movie&id=${r.tmdbId}`;
+}
 
-export default function Player({ result }) {
-  const [health, setHealth] = useState({});
+const LABEL = { checking: "checking", connecting: "connecting", active: "live" };
+
+export default function Player({ result, onLive }) {
+  const [order, setOrder] = useState(() => SERVERS);
+  const [phase, setPhase] = useState("scan"); // scan | connect | live | switching | exhausted
+  const [scanId, setScanId] = useState(null); // pill currently being swept over
+  const [verdict, setVerdict] = useState({}); // id -> true (reachable) | false (down for this title)
+  const [hung, setHung] = useState([]); // ids that timed out during this title
   const [serverId, setServerId] = useState(null);
-  const [status, setStatus] = useState("connecting");
-  const [failed, setFailed] = useState([]); // server ids that hung for this title
   const [notice, setNotice] = useState("");
-  const [open, setOpen] = useState(false);
-  const [hover, setHover] = useState(false);
-  const triedRef = useRef(new Set());
+  const [runKey, setRunKey] = useState(null); // which result the current state belongs to
+  const runRef = useRef(0);
   const loadedRef = useRef(false);
-  const switchTimer = useRef(0);
-  const noticeTimer = useRef(0);
+  const connectAt = useRef(0);
 
   const resultKey = `${result.mediaType}-${result.tmdbId}-${result.season}-${result.episode}`;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const ordered = useMemo(() => orderServers(health, read(PREF_KEY, null), recentFails()), [health, resultKey]);
-  const current = SERVERS.find((s) => s.id === serverId) || ordered[0];
-  const src = embedUrl(current, result);
-  const position = ordered.findIndex((s) => s.id === current.id) + 1;
+  // Until the scan effect has reset state for a new title, render as "scanning" — otherwise
+  // the old live player would briefly reload the new episode unblurred.
+  const stale = runKey !== resultKey;
+  const view = stale ? "scan" : phase;
+  const current = stale ? null : SERVERS.find((s) => s.id === serverId) || null;
+  const src = current ? embedUrl(current, result) : null;
+  const veiled = view !== "live";
 
-  // New title/episode: start over from the best server.
+  // ---------- scan: sweep every pill while the title-specific probe runs ----------
   useEffect(() => {
-    triedRef.current = new Set();
-    clearTimeout(switchTimer.current);
+    const run = ++runRef.current;
+    const alive = () => runRef.current === run;
+    const ord = orderServers();
+    setOrder(ord);
+    setPhase("scan");
+    setVerdict({});
+    setHung([]);
     setServerId(null);
-    setFailed([]);
     setNotice("");
+    setScanId(null);
+    setRunKey(resultKey);
+
+    let probe = null;
+    const probing = fetch(probeUrl(result))
+      .then((r) => r.json())
+      .then((d) => { probe = Object.fromEntries(d.servers.map((s) => [s.id, s.up])); })
+      .catch(() => { probe = {}; });
+
+    (async () => {
+      for (const s of ord) {
+        if (!alive()) return;
+        setScanId(s.id);
+        await wait(SCAN_STEP_MS);
+        if (probe) setVerdict((v) => ({ ...v, [s.id]: probe[s.id] !== false }));
+      }
+      await Promise.race([probing, wait(PROBE_WAIT_MS)]);
+      if (!alive()) return;
+      const final = Object.fromEntries(ord.map((s) => [s.id, probe ? probe[s.id] !== false : true]));
+      setVerdict(final);
+      setScanId(null);
+      const winner = ord.find((s) => final[s.id]) || ord[0];
+      setServerId(winner.id);
+      setPhase("connect");
+    })();
+
+    return () => { runRef.current++; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resultKey]);
 
+  // ---------- connect: watchdog on the iframe ----------
   useEffect(() => {
-    let alive = true;
-    getHealth().then((h) => { if (alive) setHealth(h); });
-    return () => { alive = false; };
-  }, []);
-
-  // Health came back saying we're on a dead server: hop before the viewer waits out the timer.
-  useEffect(() => {
-    if (health[current.id] === false) {
-      const next = ordered.find((s) => health[s.id] !== false);
-      if (next && next.id !== current.id) switchTo(next, `${current.name} is offline`);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health]);
-
-  // Watchdog: an iframe that never finishes loading usually means a dead host.
-  useEffect(() => {
-    setStatus("connecting");
+    if (phase !== "connect" || !src) return;
     loadedRef.current = false;
-    triedRef.current.add(current.id);
+    connectAt.current = Date.now();
+    const run = runRef.current;
     const t = setTimeout(() => {
-      if (loadedRef.current) return;
+      if (loadedRef.current || runRef.current !== run) return;
       write(FAILS_KEY, { ...recentFails(), [current.id]: Date.now() });
-      setFailed((f) => [...new Set([...f, current.id])]);
-      const next = ordered.find((s) => !triedRef.current.has(s.id) && health[s.id] !== false);
-      if (next) switchTo(next, `${current.name} didn't respond`);
-      else {
-        setStatus("exhausted");
-        setNotice("No server answered. Pick one to retry — some are slow on first load.");
-        setOpen(true);
-      }
+      setHung((h) => [...new Set([...h, current.id])]);
+      sweepToNext(current.id, `${current.name} didn't respond`);
     }, LOAD_TIMEOUT_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [src]);
+  }, [phase, src]);
 
-  // After an automatic switch, confirm where we landed, then let the notice fade.
-  function onLive() {
-    loadedRef.current = true;
-    setStatus("live");
-    setNotice((n) => (n.includes("switching to") ? n.replace(/switching to (.+)$/, "now on $1") : n));
-    clearTimeout(noticeTimer.current);
-    noticeTimer.current = setTimeout(() => setNotice((n) => (n.includes("now on") ? "" : n)), 4500);
+  async function sweepToNext(fromId, reason) {
+    const run = ++runRef.current;
+    const skip = new Set([...hung, fromId]);
+    const idx = order.findIndex((s) => s.id === fromId);
+    const rest = [...order.slice(idx + 1), ...order.slice(0, idx)];
+    const next = rest.find((s) => verdict[s.id] !== false && !skip.has(s.id));
+    setPhase("switching");
+    setNotice(next ? `${reason} — trying ${next.name}` : reason);
+    for (const s of rest) {
+      if (runRef.current !== run) return;
+      setScanId(s.id);
+      await wait(SWITCH_STEP_MS);
+      if (s === next) break;
+    }
+    if (runRef.current !== run) return;
+    setScanId(null);
+    if (!next) {
+      setPhase("exhausted");
+      setNotice("No server answered — tap one to retry. Some are slow on first load.");
+      return;
+    }
+    setServerId(next.id);
+    setPhase("connect");
   }
 
-  function switchTo(next, reason) {
-    setStatus("switching");
-    setNotice(`${reason} — switching to ${next.name}`);
-    clearTimeout(switchTimer.current);
-    switchTimer.current = setTimeout(() => setServerId(next.id), SWITCH_PAUSE_MS);
+  function handleLoad() {
+    if (phase !== "connect" || loadedRef.current) return;
+    loadedRef.current = true;
+    const run = runRef.current;
+    const id = current.id;
+    setTimeout(() => {
+      if (runRef.current !== run) return;
+      setPhase("live");
+      setNotice((n) => (n.includes("trying") ? n.replace(/trying (.+)$/, "now on $1") : ""));
+      onLive?.(id);
+    }, Math.max(0, MIN_CONNECT_MS - (Date.now() - connectAt.current)));
   }
 
   function pick(id) {
+    if (phase === "scan" || phase === "switching") return;
+    if (id === serverId && phase === "live") return;
+    runRef.current++;
     write(PREF_KEY, id);
-    clearTimeout(switchTimer.current);
+    setHung((h) => h.filter((x) => x !== id));
     setNotice("");
-    setOpen(false);
-    triedRef.current.delete(id);
     setServerId(id);
+    setPhase("connect");
   }
 
   function nextServer() {
-    const idx = ordered.findIndex((s) => s.id === current.id);
-    const next = [...ordered.slice(idx + 1), ...ordered.slice(0, idx)].find((s) => health[s.id] !== false);
+    if (!current) return;
+    const idx = order.findIndex((s) => s.id === current.id);
+    const next = [...order.slice(idx + 1), ...order.slice(0, idx)].find((s) => verdict[s.id] !== false && !hung.includes(s.id));
     if (next) pick(next.id);
   }
 
-  const busy = status === "connecting" || status === "switching";
-  const expanded = busy || hover || status === "exhausted";
+  function pillState(s) {
+    if (s.id === scanId) return "checking";
+    if (stale) return "idle";
+    if (s.id === serverId && (phase === "connect" || phase === "live")) return phase === "live" ? "active" : "connecting";
+    if (hung.includes(s.id) || verdict[s.id] === false) return "down";
+    if (verdict[s.id] === true) return "ok";
+    return "idle";
+  }
+
+  // Rendered in exactly one slot at a time (over the stage while veiled, in the strip once live);
+  // the shared layoutIds make every pill glide between the two.
+  const rack = (
+    <motion.div layout className={`pillRack ${veiled ? "centered" : "docked"}`} transition={{ type: "spring", stiffness: 260, damping: 30 }}>
+      {order.map((s) => {
+        const st = pillState(s);
+        const expanded = st === "checking" || st === "connecting" || st === "active";
+        return (
+          <motion.button
+            key={s.id}
+            layout
+            layoutId={`srv-${s.id}`}
+            className={`spill ${st}`}
+            onClick={() => pick(s.id)}
+            transition={{ type: "spring", stiffness: 520, damping: 36 }}
+            whileHover={view === "live" ? { y: -2 } : undefined}
+            whileTap={{ scale: 0.95 }}
+            title={st === "down" ? "Not available for this title right now" : s.name}
+          >
+            <motion.span layout className="spillDot" />
+            <motion.span layout className="spillName">{s.name}</motion.span>
+            <AnimatePresence initial={false}>
+              {expanded && (
+                <motion.span
+                  key="lbl"
+                  className="spillLabel"
+                  initial={{ opacity: 0, width: 0 }}
+                  animate={{ opacity: 1, width: "auto" }}
+                  exit={{ opacity: 0, width: 0 }}
+                  transition={{ duration: 0.18 }}
+                >
+                  {LABEL[st]}
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </motion.button>
+        );
+      })}
+    </motion.div>
+  );
+
+  const headline =
+    view === "scan" ? "Finding the best server"
+    : phase === "connect" ? `Connecting to ${current?.name}`
+    : phase === "switching" ? notice
+    : phase === "exhausted" ? "No server answered"
+    : "";
 
   return (
-    <div className="playerFrame">
-      <div className="playerCol">
-        <iframe
-          key={src}
-          src={src}
-          allowFullScreen
-          allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-          referrerPolicy="origin"
-          onLoad={onLive}
-        />
+    <LayoutGroup id="servers">
+      <div className="playerFrame">
+        <div className="playerStage">
+          {result.backdrop && <img className={`stageArt ${veiled ? "on" : ""}`} src={result.backdrop} alt="" />}
+          {src && (
+            <iframe
+              key={src}
+              src={src}
+              className={veiled ? "veiled" : ""}
+              allowFullScreen
+              allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+              referrerPolicy="origin"
+              onLoad={handleLoad}
+            />
+          )}
+          <AnimatePresence>
+            {veiled && (
+              <motion.div
+                key="veil"
+                className="veil"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.5 }}
+              >
+                <AnimatePresence mode="wait">
+                  <motion.div
+                    key={headline}
+                    className="veilTitle"
+                    initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
+                    animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                    exit={{ opacity: 0, y: -8, filter: "blur(6px)" }}
+                    transition={{ duration: 0.25 }}
+                  >
+                    {view === "exhausted" ? headline : <ShinyText speed={2}>{headline}</ShinyText>}
+                  </motion.div>
+                </AnimatePresence>
+                {view === "connect" && (
+                  <div className="veilProgress"><i key={src} style={{ animationDuration: `${LOAD_TIMEOUT_MS}ms` }} /></div>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+          {veiled && <div className="rackSlot">{rack}</div>}
+        </div>
+
+        <div className="playerStrip">
+          {!veiled ? rack : <div className="stripHint">{view === "exhausted" ? "Pick a server above" : "Testing servers…"}</div>}
+          <button className="stripBtn" onClick={nextServer} disabled={veiled && view !== "exhausted"}>
+            Next server →
+          </button>
+        </div>
+
         <AnimatePresence>
-          {status !== "live" && (
-            <motion.div
-              key="overlay"
-              className="playerOverlay"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0, filter: "blur(8px)" }}
-              transition={{ duration: 0.45 }}
-            >
-              <div className={`orbit ${status}`}>
-                <span /><span /><span />
-              </div>
-              <AnimatePresence mode="wait">
-                <motion.div
-                  key={current.id + status}
-                  className="overlayLabel"
-                  initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
-                  animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                  exit={{ opacity: 0, y: -10, filter: "blur(6px)" }}
-                  transition={{ duration: 0.3 }}
-                >
-                  {status === "switching" ? (
-                    <ShinyText speed={1.6}>{notice}</ShinyText>
-                  ) : status === "exhausted" ? (
-                    <span>No server answered — pick one below</span>
-                  ) : (
-                    <ShinyText speed={2.2}>{`Connecting to ${current.name}`}</ShinyText>
-                  )}
-                </motion.div>
-              </AnimatePresence>
-              {status === "connecting" && (
-                <div className="overlayProgress"><i key={src} style={{ animationDuration: `${LOAD_TIMEOUT_MS}ms` }} /></div>
-              )}
+          {notice && view === "live" && (
+            <motion.div key={notice} className="serverNotice" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              {notice}
             </motion.div>
           )}
         </AnimatePresence>
       </div>
-
-      <div className="playerStrip">
-        <motion.button
-          layout
-          className={`serverPill ${status}`}
-          onMouseEnter={() => setHover(true)}
-          onMouseLeave={() => setHover(false)}
-          onClick={() => setOpen((o) => !o)}
-          transition={{ type: "spring", stiffness: 420, damping: 34 }}
-          aria-expanded={open}
-        >
-          <motion.span layout className="pillDot" />
-          <motion.span layout className="pillName">
-            <AnimatePresence mode="popLayout" initial={false}>
-              <motion.span
-                key={current.id}
-                initial={{ y: 14, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: -14, opacity: 0 }}
-                transition={{ duration: 0.25 }}
-                style={{ display: "inline-block" }}
-              >
-                {current.name}
-              </motion.span>
-            </AnimatePresence>
-          </motion.span>
-          <AnimatePresence initial={false}>
-            {expanded && (
-              <motion.span
-                key="status"
-                className="pillStatus"
-                initial={{ opacity: 0, width: 0 }}
-                animate={{ opacity: 1, width: "auto" }}
-                exit={{ opacity: 0, width: 0 }}
-                transition={{ duration: 0.25 }}
-              >
-                {status === "live" ? `server ${position}/${ordered.length}` : STATUS_LABEL[status]}
-                {busy && <span className="dots"><i /><i /><i /></span>}
-              </motion.span>
-            )}
-          </AnimatePresence>
-        </motion.button>
-
-        <div className="stripActions">
-          <button className="stripBtn" onClick={() => setOpen((o) => !o)}>
-            Servers <motion.span animate={{ rotate: open ? 180 : 0 }} style={{ display: "inline-block" }}>▾</motion.span>
-          </button>
-          <button className="stripBtn" onClick={nextServer}>Not playing? Next →</button>
-        </div>
-      </div>
-
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            key="drawer"
-            className="serverDrawer"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          >
-            <motion.div
-              className="serverList"
-              initial="hidden"
-              animate="show"
-              variants={{ show: { transition: { staggerChildren: 0.03 } } }}
-            >
-              {ordered.map((s) => {
-                const down = health[s.id] === false;
-                const hung = failed.includes(s.id);
-                return (
-                  <motion.button
-                    key={s.id}
-                    variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0 } }}
-                    whileHover={{ y: -2 }}
-                    whileTap={{ scale: 0.96 }}
-                    className={`serverChip ${s.id === current.id ? "active" : ""} ${down ? "down" : ""} ${hung ? "hung" : ""}`}
-                    onClick={() => pick(s.id)}
-                    title={down ? "Offline right now" : hung ? "Didn't respond a moment ago" : ""}
-                  >
-                    <span className="dot" />
-                    {s.name}
-                    {hung && <span className="chipTag">timed out</span>}
-                  </motion.button>
-                );
-              })}
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {notice && status !== "switching" && (
-          <motion.div
-            key={notice}
-            className="serverNotice"
-            initial={{ opacity: 0, y: -6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-          >
-            {notice}
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+    </LayoutGroup>
   );
 }

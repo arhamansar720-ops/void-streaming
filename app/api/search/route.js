@@ -67,7 +67,7 @@ async function play(intent, raw) {
     return {
       kind: "result",
       reply: intent.reply || `Playing ${m.title}${m.year ? ` (${m.year})` : ""}.`,
-      result: { mediaType: "movie", tmdbId: m.tmdbId, imdbId: m.imdbId, showTitle: m.title, year: m.year },
+      result: { mediaType: "movie", tmdbId: m.tmdbId, imdbId: m.imdbId, showTitle: m.title, year: m.year, backdrop: m.backdrop, poster: m.poster },
     };
   }
   return playShow(await catalog.show(item), intent, intent.reply);
@@ -105,6 +105,8 @@ function build(show, s, eps, e, reply) {
       tmdbId: show.tmdbId,
       imdbId: show.imdbId,
       showTitle: show.title,
+      backdrop: show.backdrop,
+      poster: show.poster,
       season: s,
       episode: ep.episode,
       episodeTitle: ep.title,
@@ -138,7 +140,8 @@ function unplayable(title) {
 
 // ---------------- recommendations ----------------
 async function recommend(intent, context) {
-  const seen = new Set((context.suggested || []).map((t) => t.toLowerCase()));
+  // Skip anything already pitched this session or already in the viewer's watch history.
+  const seen = new Set([...(context.suggested || []), ...(intent.similarTo ? [] : context.watched || [])].map((t) => String(t).toLowerCase()));
   const rec = { genre: intent.genre || null, type: intent.type || null, similarTo: intent.similarTo || null };
   let picks = [];
 
